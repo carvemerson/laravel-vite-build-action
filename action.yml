@@ -1,0 +1,154 @@
+name: 'Laravel Vite Build Action'
+description: 'Builds Laravel applications with Vite assets and creates deployment artifacts'
+author: 'Emerson Carvalho'
+
+inputs:
+  php-version:
+    description: 'PHP version used to install vendors and run optional artisan caches'
+    required: false
+    default: '8.3'
+  node-version:
+    description: 'Node.js version used for Vite build'
+    required: false
+    default: '20'
+  working-directory:
+    description: 'Directory containing composer.json, package.json and the app source'
+    required: false
+    default: '.'
+  build-script:
+    description: 'NPM script to run for building assets (e.g., build or build:prod)'
+    required: false
+    default: 'build'
+  composer-options:
+    description: 'Extra options for composer install (e.g., --no-scripts)'
+    required: false
+    default: ''
+  artifact-dir:
+    description: 'Directory where the deployment bundle will be assembled'
+    required: false
+    default: 'artifact'
+  enable-artisan-caches:
+    description: 'If true, runs config/route/view cache against the artifact directory before packaging'
+    required: false
+    default: 'false'
+  artifact-name:
+    description: 'Name for the uploaded artifact'
+    required: false
+    default: 'build'
+
+outputs:
+  artifact-path:
+    description: 'Path to the generated artifact directory'
+    value: ${{ steps.prepare.outputs.artifact-path }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+
+    - name: Setup PHP
+      uses: shivammathur/setup-php@v2
+      with:
+        php-version: ${{ inputs.php-version }}
+        tools: composer:v2
+        coverage: none
+        ini-values: memory_limit=-1
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: 'npm'
+        cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+
+    - name: Install Composer dependencies (prod)
+      uses: ramsey/composer-install@v3
+      with:
+        working-directory: ${{ inputs.working-directory }}
+        composer-options: --no-dev --no-progress --prefer-dist --optimize-autoloader --no-interaction ${{ inputs.composer-options }}
+
+    - name: Install Node deps and build assets
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: |
+        npm ci --no-audit --no-fund
+        npm run ${{ inputs.build-script }}
+
+    - name: Prepare artifact structure
+      id: prepare
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ARTIFACT_DIR: ${{ inputs.artifact-dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "$ARTIFACT_DIR"
+        # rsync preserves dotfiles; we explicitly exclude runtime/cache-only paths
+        rsync -a --delete \
+          --exclude='.git' \
+          --exclude='.github' \
+          --exclude='.junie' \
+          --exclude='.env' \
+          --exclude='node_modules' \
+          --exclude='tests' \
+          --exclude='bootstrap/cache/*' \
+          --exclude='storage/logs' \
+          --exclude='storage/framework/cache' \
+          --exclude='storage/framework/sessions' \
+          --exclude='storage/framework/testing' \
+          --exclude='resources/js' \
+          --exclude='resources/css' \
+          ./ "$ARTIFACT_DIR/"
+
+        # Ensure runtime directories exist in artifact
+        mkdir -p "$ARTIFACT_DIR/storage/framework/"{sessions,views,cache}
+        mkdir -p "$ARTIFACT_DIR/storage/logs"
+        
+        # Set output for artifact path
+        echo "artifact-path=$PWD/$ARTIFACT_DIR" >> $GITHUB_OUTPUT
+
+    - name: Verify Vite build output exists
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ARTIFACT_DIR: ${{ inputs.artifact-dir }}
+      run: |
+        test -f "$ARTIFACT_DIR/public/build/manifest.json" || {
+          echo 'Vite manifest not found at public/build/manifest.json in artifact';
+          ls -la "$ARTIFACT_DIR/public" || true;
+          exit 1;
+        }
+
+    - name: Install vendors inside artifact (idempotent)
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ARTIFACT_DIR: ${{ inputs.artifact-dir }}
+      run: |
+        if [ ! -d "$ARTIFACT_DIR/vendor" ]; then
+          composer install --no-dev --no-progress --prefer-dist --optimize-autoloader --no-interaction --working-dir="$ARTIFACT_DIR"
+        fi
+
+    - name: (Optional) warm Laravel caches in artifact
+      if: ${{ inputs.enable-artisan-caches == 'true' }}
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        ARTIFACT_DIR: ${{ inputs.artifact-dir }}
+      run: |
+        php -v
+        pushd "$ARTIFACT_DIR" >/dev/null
+        php artisan config:cache || true
+        php artisan route:cache || true
+        php artisan view:cache || true
+        popd >/dev/null
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        include-hidden-files: 'true'
+        path: ${{ inputs.working-directory }}/${{ inputs.artifact-dir }}
