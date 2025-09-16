@@ -152,3 +152,4 @@ runs:
         name: ${{ inputs.artifact-name }}
         include-hidden-files: 'true'
         path: ${{ inputs.working-directory }}/${{ inputs.artifact-dir }}
+        retention-days: 1
