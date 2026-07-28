@@ -35,6 +35,18 @@ inputs:
     description: 'Name for the uploaded artifact'
     required: false
     default: 'build'
+  upload-artifact:
+    description: >-
+      If true, uploads the bundle with actions/upload-artifact. Set to false when the bundle is
+      consumed by a later step in the SAME job (it reads the artifact-path output, a local
+      directory on the runner) — the upload is then pure overhead, and once the account runs out
+      of artifact storage it fails, taking the whole build down with it.
+    required: false
+    default: 'true'
+  retention-days:
+    description: 'Days to keep the uploaded artifact (ignored when upload-artifact is false)'
+    required: false
+    default: '1'
 
 outputs:
   artifact-path:
@@ -147,9 +159,10 @@ runs:
         popd >/dev/null
 
     - name: Upload artifact
+      if: ${{ inputs.upload-artifact == 'true' }}
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact-name }}
         include-hidden-files: 'true'
         path: ${{ inputs.working-directory }}/${{ inputs.artifact-dir }}
-        retention-days: 1
+        retention-days: ${{ inputs.retention-days }}
